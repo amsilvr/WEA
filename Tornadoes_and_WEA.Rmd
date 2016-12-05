@@ -1,15 +1,42 @@
-#setup
-require(tidyverse)
-require(lubridate)
-require(stringr)
-require(RCurl)
+---
+title: "NOAA Weather Damage Analysis"
+output:
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    toc: yes
+  html_notebook: default
+  pdf_document:
+    toc: yes
+---
+
+
+```{r setup, cache = TRUE, echo=FALSE}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	include = FALSE
+)
+library(knitr)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(RCurl)
 require(reshape2)
 
-#create download and save-file URLs
-url <- "ftp://ftp.ncdc.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
+```
+# Reading Data 
 
-# mod_date1 <- "20160223" # As of 11/21/16, most files through 2013 have mod date of 2016-02-23
-# mod_date2 <- "20161118" # As of 11/21/16, files through 2014 have mod date of 2016-11-18
+Event information was taken from the  [NOAA](ftp://ftp.ncdc.noaa.gov/pub/data/swdi/stormevents/csvfiles/) database of storm events. The events are downloaded from NOAA when this report is run so that we can get the most recently updated data. 
+
+```{r main_data_frame, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+
+#create download and save-file URLs
+# To analyze most recent data use
+url <-        "ftp://ftp.ncdc.noaa.gov/pub/data/swdi/stormevents/csvfiles/" 
+# To speed up for testing, ftp docs to "data/" and uncomment the next line
+
+# url <- "data/"
 
 dld_base <- "StormEvents_details-ftp_v1.0_d"
 
@@ -17,16 +44,13 @@ if (!file.exists("data")) {
         dir.create("data")
 }
 
-# Have we created the dataframe and downloaded data into it?
-
-if (!exists("wedf")){ # If not, get to work
-
-# All files in remote directory are loaded into the character vector
-# "filenames"
- 
-filenames <- getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE)
-filenames <- strsplit(filenames, "\r\n")
-filenames = unlist(filenames)
+if (!exists("wedf")) { # If not, get to work
+# To use downloaded files, use the next line to parse only
+        #filenames <- dir("data/") 
+# To parse files from NWS, use the next line and comment out above
+         filenames <-  getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE) 
+        filenames <- strsplit(filenames, "\r\n")
+        filenames = unlist(filenames)
 
 # detail.files contains the list of the files that we actually 
 # want to download 
@@ -34,8 +58,8 @@ filenames = unlist(filenames)
 detail.files <- filenames[grep(dld_base, filenames)]
 
         filenames = ""
-        for(i in 1996:2016) {
-                filenames[i-1995] <- detail.files[grep(paste0(".*_d",i,"_.*"),detail.files)]
+        for (i in 1997:2016) {
+                filenames[i - 1996] <- detail.files[grep(paste0(".*_d",i,"_.*"),detail.files)]
         }
 
         wedf <- data.frame()
@@ -102,8 +126,12 @@ detail.files <- filenames[grep(dld_base, filenames)]
         }
 
 }
-# Select relevant columns into the Weather Event Tbl (wetbl)
- 
+
+head(wedf)
+```
+Then, we will find the types of weather events causing the highest number of injuries and fatalities over the past twenty years. 
+
+```{r subsetting, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
 wetbl <- as.tbl(
         select(wedf
         , id = EVENT_ID
@@ -152,22 +180,25 @@ tmp2 <- if_else( mlt == "H",  10^2
                                     , 10^0)
                   )
         )
-)
+, 10^0)
 
 wetbl$damage_property <- tmp * tmp2
+rm(list = c("mlt", "tmp", "tmp2"))
 
 tmp <- as.numeric(str_extract(wetbl$damage_crops,"^[^HKMB]*"))
 mlt <- str_extract(wetbl$damage_crops,"[HKMB]$")      
-tmp2 <- if_else( mlt == "H",  10^2
+tmp2 <- as.numeric(if_else( mlt == "H",  10^2
                  , if_else(mlt == "K",  10^3
                            , if_else(mlt == "M", 10^6
                                      , if_else(mlt == "B", 10^9
                                                , 10^0)
                            )
                  )
-)
+), 10^0)
 wetbl$damage_crops <- tmp * tmp2
 rm(list = c("mlt", "tmp", "tmp2"))
+
+head(wetbl)
 
 event.damage <- transmute(wetbl
                         , id = id
@@ -183,110 +214,183 @@ event.damage <- transmute(wetbl
                         , fips = paste0(st,cz)
                         , fscale
                        ) %>%
-                arrange(year, type)
+                arrange(year, type) %>%
+ mutate(wea_possible = as.logical(
+               if_else(begin >= mdy("5/1/2012")
+                       , true = "TRUE"
+                       , false = "FALSE")
+               )
+)
 
-top.t <- select(event.damage
-                         , type
-                         , year
-                         , ends_with("direct")) %>%
+```
+# Selecting Event Types
+With 52 event types, we are only going to focus on the most damaging ones.  I will look at the total of directly-caused, deaths and injuries.
+
+```{r most_common, echo=-1, message=FALSE, warning=FALSE, cache=TRUE}
+tmp <- select(event.damage
+         , type
+         , year
+         , injuries_direct
+         , injuries_indirect
+         , deaths_direct
+         , deaths_indirect
+         , damage_property
+         , damage_crops) %>%
         group_by(type) %>%
-        summarize_at(c(3:6), sum) %>%
-        top_n(5, wt = deaths_direct + injuries_direct) %>%
-        mutate(type = factor(type, ordered = TRUE))
+        summarize_at(c(3:8), c("sum", "mean"), na.rm = TRUE)
 
-health.5 <- filter(event.damage, type %in% top.t$type) %>%
-             mutate(type = factor(type, ordered = TRUE))
+top_death <- top_n(tmp, 10, wt = deaths_direct_mean) %>%
+        transmute(type = factor(type)
+                  , direct = deaths_direct_sum
+                  , indirect = deaths_indirect_sum) %>%
+        arrange(desc(direct))
 
-health.mean.5 <- select(event.damage,1:8) %>%
-        filter(type %in% top.t$type) %>%
+top_injury <- top_n(tmp, 10, wt = injuries_direct_mean) %>%
+                transmute(type = factor(type)
+                  , direct = injuries_direct_sum
+                  , indirect = injuries_indirect_sum) %>%
+        arrange(desc(direct))
+
+top_damage <- top_n(tmp, 10, wt = damage_property_mean) %>%
+               transmute(type = factor(type)
+                  , property = damage_property_sum
+                  , crops = damage_crops_sum) %>%
+        arrange(desc(property))
+
+print(top_death)
+print(top_injury)
+print(top_damage)
+
+health.10 <- filter(event.damage
+                    , type %in% top_death$type) %>%
+             mutate(type = factor(type), ordered = TRUE)
+
+health.mean.10 <- select(event.damage,1:8) %>%
+        filter(type %in% top_death$type) %>%
         mutate(type = factor(type)) %>%
         group_by(year, type) %>%
         summarize_at(c(5:8), mean)
 
-health.median.5 <- select(event.damage,1:8) %>%
-        filter(type %in% top.t$type) %>%
-        mutate(type = factor(type)) %>%
-        group_by(year, type) %>%
-        summarize_at(c(5:8), median)
-
-health.sum.5 <- select(event.damage,1:8) %>%
-        filter(type %in% top.t$type) %>%
+health.sum.10 <- select(event.damage,1:8) %>%
+        filter(type %in% top_death$type) %>%
         mutate(type = factor(type)) %>%
         group_by(year, type) %>%
         summarize_at(c(5:8), sum)
 
-
-hs.long <- melt(health.mean.5, id.var = c("year","type")
+hmean.long <- melt(health.mean.10, id.var = c("year","type")
                 ,variable.name = "casualties")
-# Injuries as a result of Weather Events#
- g <- ggplot(data = filter(hs.long, casualties == "injuries_direct"), 
-            mapping = aes(year, value
-                          , fill = type
+
+hsum.long <- melt(health.sum.10, id.var = c("year","type")
+                ,variable.name = "casualties")
+
+```
+# Data Plots
+Wireless Emergency Alerts are designed to warn about imminent threats to life or property. By using text analyis tools on a database of all WEA messages sent since May of 2014, we can create a plot of frequency for the different types of messages. The National Weather Service (NWS) uses the WEA messages almost exclusively to warn about tornadoes and flash floods. 
+
+<!-- Attach the text analysis of WEA messages -->
+```{r text analysis of WEA messages, echo=TRUE, message=FALSE, warning=FALSE}
+
+source('C:/Users/amsilverman/Box Sync/@Project Support/WEA_Analysis/NOAA Analysis/textMining.R')
+
+```
+
+The WEA messages are used for these types of weather events because
+
+1. tornadoes and flash floods cause a very high proportion of weather-related casualties and 
+
+1. tornadoes and flash floods are fast-moving and extremely localized events, both of which make WEA messages an ideal medium for warnings. 
+
+# Effects of WEA on Weather-Related Injuries and Deaths
+
+By plotting the casualties caused by similarly-sized tornadoes before and after the advent of WEA, we might see some effect of the warnings on population health. 
+
+We will first use property damage as a proxy for event strength, as the 90-character WEA messages are more likely to help a person move to safety - the short notice that these alerts give are unlikely to give a recipient sufficient time to protect property before a tornado strikes.
+
+```{r Plots, echo=TRUE, fig.width=7, message=FALSE, warning=FALSE}
+
+# Total Casualties as a result of Weather Events#
+ g <- ggplot(data = filter(hsum.long, casualties == "deaths_direct" | casualties == "injuries_direct"), 
+            mapping = aes(type, value
                           , facets = casualties
                           , ylim(0,2))
             )
 
 # 
-g + geom_bar(stat = "identity", position = "stack") + facet_grid(~casualties) + theme(axis.text.x = element_text(angle = 90), complete = FALSE)
+g + geom_bar(stat = "identity", position = "stack") +
+        facet_wrap(~casualties, ncol = 1, scales = "free_y") +
+        scale_fill_brewer(palette = "Set3") + 
+        theme_minimal() + 
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        ggtitle("Casualties Due to Weather Events", subtitle = "By type 1997 - 2016, total")
 
-# Total Deaths as a Direct consequence of Weather Events
+# Yearly Casualties as a Direct consequence of Weather Events
 
-hsum.long <- melt(health.sum.5, id.var = c("year","type")
-     ,variable.name = "casualties")
-
-g <- ggplot(data = filter(hsum.long, casualties == "deaths_direct"), 
+g <- ggplot(data = filter(hsum.long, casualties == "deaths_direct" | casualties == "injuries_direct"),
             mapping = aes(year, value
                           , fill = type
                           , facets = casualties
-                          , ylim(0,2))
-)
+                         # , ylim(0,2)
+                          )
+        )
 
 # 
-g + geom_bar(stat = "identity", position = "stack") + facet_grid(~casualties) + theme(axis.text.x = element_text(angle = 90), complete = FALSE)
-
-# Plot property damage against deaths and injuries
-
-event.damage <- mutate(event.damage, 
-       wea.possible = as.logical(
-               if_else(
-                       as.numeric(
-                           as.character(year)) >= 2012
-                       , true = "TRUE"
-                       , false = "FALSE")
-               )
-)
-       
-m <- ggplot(data = filter(event.damage
-                  , type %in% c("Flash Flood"
-                                , "Thunderstorm Wind"
-                                , "Tornado")
-                  , damage_property > 0
-                  ) %>% group_by(wea.possible)
-            , mapping = aes(deaths_direct + injuries_direct
-                            , damage_property / 1000000
-                            , color = type
-                            , facets = wea.possible))
-m + geom_point(na.rm = TRUE) + facet_grid(~wea.possible) + xlim(0,50) + ylim(0,300) + geom_smooth(method = "lm", na.rm = TRUE, fullrange = TRUE)
-
-# Strength of Tornado (Fscale), vs deaths and injuries
-# Looking at the mean direct deaths and injuries pre and post 
-# the implementation of WEA. 
-# 
-# There has only been one F5 tornado since 2012, and  are more rare and so much more deadly that 
-# make the decreases in lower strength tornadoes hard to see
-# They are ommitted from this graph.
+g + geom_bar(stat = "identity", position = "stack") +
+        facet_wrap(~casualties, nrow = 4, scales = "free_y") + 
+        scale_fill_brewer(palette = "Set3") +
+        theme_minimal() + 
+       theme(axis.text.x = element_text(angle = 90), complete = FALSE) + 
+        ggtitle("Yearly Casualties due to Weather Events by Type", subtitle = "10 Most Common Types, 1997 - 2016") 
 
 tornado <- filter(event.damage, type == "Tornado") %>%
-#        select(begin, year:wea.possible) %>%
+                group_by(wea_possible)
+
+m <- ggplot(data =  tornado %>% group_by(wea_possible)
+            , mapping = aes(deaths_direct, damage_property
+                            , facets = wea_possible)
+        )
+m + geom_point(na.rm = TRUE) +
+        facet_grid(~wea_possible) +
+        xlim(0,15) + ylim(0,10^8) + 
+        geom_smooth(method = "lm", na.rm = TRUE, fullrange = TRUE) +
+        scale_fill_brewer(palette = "Set3") +
+        theme_minimal() +
+        ggtitle("Tornado Deaths", subtitle = "Before and After WEA")
+
+m <- ggplot(data =  tornado %>% group_by(wea_possible)
+            , mapping = aes(injuries_direct, damage_property
+                            , facets = wea_possible)
+)
+m + geom_point(na.rm = TRUE) +
+        facet_wrap(~wea_possible) +
+        xlim(0,15) + ylim(0,2*10^7) + 
+        geom_smooth(method = "lm", na.rm = TRUE, fullrange = TRUE) +
+        scale_fill_brewer(palette = "Set3") +
+        theme_minimal() +
+        ggtitle("Tornado Injuries", subtitle = "Before and After WEA")
+
+
+
+
+```
+
+## Strength of Tornado (Fscale), vs deaths and injuries 
+Total deaths and injuries as functions of property damage seem marginally lower post-WEA, however we can also use the Enhanced Fujita Scale to directly compare the effects of similarly-sized tornadoes. 
+
+Because there has only been one F5 tornado since WEA implementation in 2012 -- the Moore, Oklahoma tornado of May, 2013 which killed 24 and injured 207. Because of the small sample size, F5 tornadoes are omitted from this graph.
+```{r tornado_casualties, echo=TRUE}
+library(stringr)
+library(reshape2)
+tornado <- filter(event.damage, type == "Tornado") %>%
+#        select(begin, year:wea_possible) %>%
         mutate(fscale = as.factor(
                 str_extract(fscale, "[0-9]"))) %>%
         filter(!is.na(fscale), as.numeric(fscale) <= 5) %>%
-        group_by(wea.possible)
+        group_by(wea_possible)
 
 big_tornado <- filter(tornado, as.numeric(fscale) > 4)
 
 tornado_summary <- summarise_at(group_by(tornado
-                                         , wea.possible
+                                         , wea_possible
                                          , fscale)
                                 , c("deaths_direct"
                                     , "injuries_direct"
@@ -299,7 +403,7 @@ tornado_summary <- summarise_at(group_by(tornado
 
 
 tornado_summary <- melt(tornado_summary
-     , id.vars = c("wea.possible","fscale")
+     , id.vars = c("wea_possible","fscale")
      , variable.name = "type"
      , value.name = "casualty")
 
@@ -307,7 +411,7 @@ n <- ggplot(data = tornado_summary
              , mapping = aes(fscale
                              , casualty
                              , facets = type
-                             , fill = wea.possible
+                             , fill = wea_possible
                              ))
 n + geom_bar(stat = "identity", position = "dodge") + 
         facet_wrap(~type,nrow = 2 ,labeller = label_both, scales = "free") +
@@ -317,3 +421,7 @@ n + geom_bar(stat = "identity", position = "dodge") +
         scale_fill_brewer(palette = "Set3") + 
         theme_minimal()
         
+
+
+```
+
